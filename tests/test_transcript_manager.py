@@ -26,11 +26,12 @@ def test_transcript_default_disabled():
     )
 
 
-def test_transcript_skip_when_missing_api_key(tmp_path):
+def test_transcript_fails_when_missing_api_key(tmp_path):
     config = ConfigLoader()
     config.update(
         transcript={
             "enabled": True,
+            "provider": "openai_api",
             "api_key_env": "OPENAI_API_KEY",
             "api_key": "",
             "output_dir": "",
@@ -48,10 +49,9 @@ def test_transcript_skip_when_missing_api_key(tmp_path):
 
     result = asyncio.run(manager.process_video(video_path, aweme_id="123"))
 
-    assert result["status"] == "skipped"
-    assert result["reason"] == "missing_api_key"
-    assert database.rows[-1]["status"] == "skipped"
-    assert database.rows[-1]["skip_reason"] == "missing_api_key"
+    # Provider returns failed TranscriptResult when API key is missing
+    assert result["status"] == "failed"
+    assert database.rows[-1]["status"] == "failed"
 
 
 def test_transcript_output_dir_defaults_to_video_dir(tmp_path):

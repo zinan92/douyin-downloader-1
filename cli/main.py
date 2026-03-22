@@ -11,6 +11,7 @@ from auth import CookieManager
 from storage import Database, FileManager
 from control import QueueManager, RateLimiter, RetryHandler
 from core import DouyinAPIClient, URLParser, DownloaderFactory
+from core.pipeline import is_local_media, run_local_pipeline
 from cli.progress_display import ProgressDisplay
 from utils.logger import setup_logger, set_console_log_level
 
@@ -170,6 +171,43 @@ async def main_async(args):
         display.print_success("Database initialized")
 
     urls = config.get_links()
+
+    # Separate local files from remote URLs
+    local_paths = []
+    remote_urls = []
+    for u in urls:
+        if is_local_media(u) or Path(u).is_dir():
+            local_paths.append(u)
+        else:
+            remote_urls.append(u)
+
+    if local_paths:
+        display.print_info(f"Found {len(local_paths)} local file/dir input(s)")
+        from core.pipeline import run_local_pipeline as _run_local
+        for lp in local_paths:
+            p = Path(lp)
+            files = []
+            if p.is_file():
+                files = [p]
+            elif p.is_dir():
+                from core.pipeline import LOCAL_MEDIA_EXTENSIONS
+                files = sorted(
+                    f for f in p.iterdir()
+                    if f.is_file() and f.suffix.lower() in LOCAL_MEDIA_EXTENSIONS
+                )
+            if files:
+                display.print_info(f"Processing {len(files)} local file(s) from {lp}")
+                local_result = await _run_local(
+                    files,
+                    config=config.config,
+                    output_dir=Path(config.get("path", "./Downloaded")),
+                    database=database,
+                )
+                display.print_success(
+                    f"Local pipeline: {local_result.items_success}/{local_result.items_total} succeeded"
+                )
+
+    urls = remote_urls
     display.print_info(f"Found {len(urls)} URL(s) to process")
 
     all_results = []

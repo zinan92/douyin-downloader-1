@@ -12,7 +12,7 @@
 中文文档 (Chinese): [README.zh-CN.md](./README.zh-CN.md)
 
 
-A practical Douyin downloader supporting videos, image-notes, collections, music, favorites collections, and profile batch downloads, with progress display, retries, SQLite deduplication, download integrity checks, and browser fallback support.
+A practical Douyin downloader and content pipeline supporting videos, image-notes, collections, music, favorites collections, profile batch downloads, and **local media files** — with transcription, markdown archiving, structured analysis, progress display, retries, SQLite deduplication, download integrity checks, and browser fallback support.
 
 > This document targets **V2.0 (`main` branch)**.  
 > For the legacy version, switch to **V1.0**: `git fetch --all && git switch V1.0`
@@ -30,9 +30,12 @@ A practical Douyin downloader supporting videos, image-notes, collections, music
 | Short link parsing | `https://v.douyin.com/...` |
 | Profile batch download | `/user/{sec_uid}` + `mode: [post, like, mix, music]` |
 | Logged-in favorites collections | `/user/self?showTab=favorite_collection` + `mode: [collect, collectmix]` |
+| **Local file input** | Process local `.mp4/.mov/.m4v/.mp3/.wav` files or directories — skip download, go straight to transcription |
 | No-watermark preferred | Automatically selects watermark-free video source |
 | Extra assets | Cover, music, avatar, JSON metadata |
-| Video transcription | Optional, using OpenAI Transcriptions API |
+| Video transcription | Optional, using OpenAI API **or local Whisper** (mlx-whisper / openai-whisper) |
+| Markdown archive | Per-video `.md` file with metadata + formatted transcript |
+| Analysis JSON | Structured `_analysis.json` summary per video |
 | Concurrent downloads | Configurable concurrency, default 5 |
 | Retry with backoff | Exponential backoff (1s, 2s, 5s) |
 | Rate limiting | Default 2 req/s |
@@ -134,12 +137,24 @@ browser_fallback:
 
 transcript:
   enabled: false
+  provider: openai_api   # "openai_api", "local", or "auto"
   model: gpt-4o-mini-transcribe
+  local_model: small     # for local provider: tiny/base/small/medium/large
+  language_hint: zh
   output_dir: ""
   response_formats: ["txt", "json"]
   api_url: https://api.openai.com/v1/audio/transcriptions
   api_key_env: OPENAI_API_KEY
   api_key: ""
+
+archive:
+  enabled: true
+  output_dir: ""
+  raw: false
+
+analysis:
+  enabled: true
+  output_dir: ""
 ```
 
 ## Usage
@@ -259,6 +274,25 @@ number:
   collectmix: 0
 ```
 
+### Process a local video file (no download needed)
+
+```yaml
+link:
+  - /path/to/video.mp4
+
+transcript:
+  enabled: true
+  provider: local        # uses mlx-whisper or whisper CLI
+  local_model: small
+```
+
+Or a directory of videos:
+
+```yaml
+link:
+  - /path/to/video_directory/
+```
+
 ### Incremental download (only new items)
 
 ```yaml
@@ -274,38 +308,83 @@ number:
   post: 0
 ```
 
-## Optional Feature: Video Transcription (`transcript`)
+## Pipeline: Transcription + Archive + Analysis
 
-Current behavior applies to **video items only** (image-note items do not generate transcripts).
+When `transcript.enabled: true`, each video goes through a 3-stage pipeline:
 
-### 1) Enable in config
+1. **Transcription** — speech-to-text via configurable provider
+2. **Archive** — formatted Markdown file with metadata + transcript
+3. **Analysis** — structured JSON summary
+
+### Transcript Providers
+
+| Provider | Config value | Description |
+|----------|-------------|-------------|
+| OpenAI API | `openai_api` | Uses OpenAI-compatible transcription API (default) |
+| Local Whisper | `local` | Uses mlx-whisper (Apple Silicon) with openai-whisper CLI fallback |
+| Auto | `auto` | Tries local first, falls back to OpenAI API |
 
 ```yaml
 transcript:
   enabled: true
-  model: gpt-4o-mini-transcribe
-  output_dir: ""        # empty: same folder as video; non-empty: mirrored to target dir
-  response_formats:
-    - txt
-    - json
+  provider: auto          # "openai_api", "local", or "auto"
+  model: gpt-4o-mini-transcribe   # for openai_api provider
+  local_model: small               # for local provider: tiny/base/small/medium/large
+  language_hint: zh
+  output_dir: ""
+  response_formats: ["txt", "json"]
   api_key_env: OPENAI_API_KEY
-  api_key: ""           # can be set directly, or via environment variable
+  api_key: ""
 ```
 
-Recommended to provide key through environment variable:
+For local whisper, install one of:
 
 ```bash
-export OPENAI_API_KEY="sk-xxxx"
+pip install mlx-whisper    # Apple Silicon (recommended, 5-10x faster)
+pip install openai-whisper  # CPU fallback
 ```
 
-### 2) Output files
+### Archive (Markdown)
 
-When enabled, it generates:
+When `archive.enabled: true` (default), generates a `.md` file per video:
 
-- `xxx.transcript.txt`
-- `xxx.transcript.json`
+```markdown
+# Video Title
 
-If `database: true`, job status is also recorded in SQLite table `transcript_job` (`success/failed/skipped`).
+> 日期: 2026-03-22 | 作者: AuthorName | 来源: https://douyin.com/video/123 | ID: 123
+
+**标签:** #tag1, #tag2
+
+Formatted transcript paragraphs here...
+```
+
+### Analysis (JSON)
+
+When `analysis.enabled: true` (default), generates an `_analysis.json` per video:
+
+```json
+{
+  "title": "Video Title",
+  "author": "AuthorName",
+  "source_type": "douyin",
+  "aweme_id": "123",
+  "publish_time": "2026-03-22",
+  "tags": ["tag1", "tag2"],
+  "short_summary": "First few sentences of transcript...",
+  "analyzed_at": "2026-03-22T10:30:00"
+}
+```
+
+### Pipeline output files
+
+When fully enabled, each video produces:
+
+- `xxx.transcript.txt` — formatted plain text transcript
+- `xxx.transcript.json` — raw transcript JSON
+- `xxx.md` — markdown archive with metadata + formatted transcript
+- `xxx_analysis.json` — structured summary
+
+If `database: true`, job status is also recorded in SQLite table `transcript_job`.
 
 ## Testing
 
@@ -332,7 +411,11 @@ pytest -q
 | `folderstyle` | Create per-item subdirectories |
 | `browser_fallback.*` | Browser fallback for `post` when pagination is restricted |
 | `progress.quiet_logs` | Quiet logs during progress stage |
-| `transcript.*` | Optional transcription after video download |
+| `transcript.*` | Transcription config: provider, model, language, output |
+| `transcript.provider` | `openai_api`, `local`, or `auto` |
+| `transcript.local_model` | Whisper model for local provider: `tiny`/`base`/`small`/`medium`/`large` |
+| `archive.*` | Markdown archive output config |
+| `analysis.*` | JSON analysis summary config |
 | `proxy` | HTTP/HTTPS proxy for API requests and media downloads, e.g. `http://127.0.0.1:7890` |
 | `database` | Enable SQLite deduplication and history |
 | `database_path` | SQLite path, default is `dy_downloader.db` in the current working directory |
@@ -357,8 +440,10 @@ workspace/
         │       ├── ..._music.mp3
         │       ├── ..._data.json
         │       ├── ..._avatar.jpg
-        │       ├── ...transcript.txt
-        │       └── ...transcript.json
+        │       ├── ...transcript.txt       # plain text transcript
+        │       ├── ...transcript.json      # raw transcript JSON
+        │       ├── ...md                   # markdown archive (NEW)
+        │       └── ..._analysis.json       # structured summary (NEW)
         ├── like/
         │   └── ...
         ├── mix/
@@ -430,8 +515,23 @@ Check in order:
 
 - whether `transcript.enabled` is `true`
 - whether downloaded items are videos (image-notes are not transcribed)
-- whether `OPENAI_API_KEY` (or `transcript.api_key`) is valid
+- if using `openai_api` provider: whether `OPENAI_API_KEY` (or `transcript.api_key`) is valid
+- if using `local` provider: whether `mlx-whisper` or `whisper` CLI is installed
 - whether `response_formats` includes `txt` or `json`
+
+### 5a) How to use local files without Douyin?
+
+Set your local file or directory path as a link in config:
+
+```yaml
+link:
+  - /path/to/video.mp4
+transcript:
+  enabled: true
+  provider: local
+```
+
+Supported formats: `.mp4`, `.mov`, `.m4v`, `.mp3`, `.wav`, `.m4a`, `.aac`
 
 ### 5) How to view download history?
 

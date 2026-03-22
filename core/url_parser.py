@@ -1,5 +1,8 @@
 import re
-from typing import Optional, Dict, Any
+from pathlib import Path
+from typing import Optional, Dict, Any, List
+
+from core.pipeline import LOCAL_MEDIA_EXTENSIONS
 from utils.validators import parse_url_type
 from utils.logger import setup_logger
 
@@ -9,6 +12,11 @@ logger = setup_logger('URLParser')
 class URLParser:
     @staticmethod
     def parse(url: str) -> Optional[Dict[str, Any]]:
+        # Check if it's a local file path
+        local_result = URLParser._parse_local_path(url)
+        if local_result:
+            return local_result
+
         url_type = parse_url_type(url)
         if not url_type:
             logger.error("Unsupported URL type: %s", url)
@@ -46,6 +54,35 @@ class URLParser:
                 result['music_id'] = music_id
 
         return result
+
+    @staticmethod
+    def _parse_local_path(path_str: str) -> Optional[Dict[str, Any]]:
+        """Check if input is a local media file or directory of media files."""
+        p = Path(path_str)
+
+        if p.is_file() and p.suffix.lower() in LOCAL_MEDIA_EXTENSIONS:
+            return {
+                'original_url': path_str,
+                'type': 'local_file',
+                'file_path': str(p.resolve()),
+                'files': [str(p.resolve())],
+            }
+
+        if p.is_dir():
+            media_files = sorted(
+                str(f.resolve())
+                for f in p.iterdir()
+                if f.is_file() and f.suffix.lower() in LOCAL_MEDIA_EXTENSIONS
+            )
+            if media_files:
+                return {
+                    'original_url': path_str,
+                    'type': 'local_dir',
+                    'dir_path': str(p.resolve()),
+                    'files': media_files,
+                }
+
+        return None
 
     @staticmethod
     def _extract_video_id(url: str) -> Optional[str]:

@@ -38,13 +38,16 @@ browser = [
 transcribe = [
     "openai-whisper>=20231117",
 ]
+transcribe-mlx = [
+    "mlx-whisper>=0.1.0",
+]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
     "ruff>=0.4.0",
 ]
 all = [
-    "douyin-downloader[browser,transcribe,dev]",
+    "douyin-downloader[browser,transcribe,transcribe-mlx,dev]",
 ]
 
 [project.scripts]

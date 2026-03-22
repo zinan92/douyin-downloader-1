@@ -1,5 +1,8 @@
 link:
   - https://www.douyin.com/user/MS4wLjABAAAA6O7EZyfDRYXxJrUTpf91K3tmB4rBROkAw-nYMfld8ss
+  # Also supports local file paths:
+  # - /path/to/video.mp4
+  # - /path/to/video_directory/
 
 path: ./Downloaded/
 
@@ -41,9 +44,17 @@ database_path: dy_downloader.db
 progress:
   quiet_logs: true
 
+# ── Transcript ──
 transcript:
   enabled: false
+  # Provider: "openai_api", "local", or "auto"
+  #   openai_api — uses OpenAI-compatible API (default)
+  #   local      — uses mlx-whisper (Apple Silicon) or openai-whisper CLI
+  #   auto       — tries local first, falls back to openai_api
+  provider: openai_api
   model: gpt-4o-mini-transcribe
+  local_model: small  # for local provider: tiny/base/small/medium/large
+  language_hint: zh
   output_dir: ""
   response_formats:
     - txt
@@ -51,6 +62,17 @@ transcript:
   api_url: https://api.openai.com/v1/audio/transcriptions
   api_key_env: OPENAI_API_KEY
   api_key: ""
+
+# ── Archive (Markdown output) ──
+archive:
+  enabled: true   # generates .md per video when transcript is enabled
+  output_dir: ""  # empty = same directory as transcript output
+  raw: false      # true = skip paragraph formatting
+
+# ── Analysis (JSON summary) ──
+analysis:
+  enabled: true   # generates _analysis.json per video when transcript is enabled
+  output_dir: ""  # empty = same directory as transcript output
 
 browser_fallback:
   enabled: true

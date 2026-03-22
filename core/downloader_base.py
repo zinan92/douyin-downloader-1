@@ -413,7 +413,13 @@ class BaseDownloader(ABC):
 
         if media_type == "video" and video_path is not None:
             transcript_result = await self.transcript_manager.process_video(
-                video_path, aweme_id=aweme_id
+                video_path,
+                aweme_id=aweme_id,
+                title=desc,
+                author=author.get("nickname", author_name),
+                publish_date=publish_date,
+                source_url=aweme_data.get("share_url", ""),
+                tags=self._extract_tags(aweme_data),
             )
             transcript_status = transcript_result.get("status")
             if transcript_status == "skipped":

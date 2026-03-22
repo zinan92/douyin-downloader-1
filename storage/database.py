@@ -75,6 +75,19 @@ class Database:
         await db.execute('CREATE INDEX IF NOT EXISTS idx_transcript_aweme_id ON transcript_job(aweme_id)')
         await db.execute('CREATE INDEX IF NOT EXISTS idx_transcript_status ON transcript_job(status)')
 
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS archive_record (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                aweme_id TEXT NOT NULL,
+                source_type TEXT NOT NULL DEFAULT 'douyin',
+                markdown_path TEXT,
+                analysis_path TEXT,
+                created_at INTEGER,
+                UNIQUE(aweme_id, source_type)
+            )
+        ''')
+        await db.execute('CREATE INDEX IF NOT EXISTS idx_archive_aweme_id ON archive_record(aweme_id)')
+
         await db.commit()
         self._initialized = True
 
@@ -210,6 +223,25 @@ class Database:
             'created_at': row[9],
             'updated_at': row[10],
         }
+
+    async def upsert_archive_record(self, record: Dict[str, Any]):
+        now_ts = int(datetime.now().timestamp())
+        db = await self._get_conn()
+        await db.execute('''
+            INSERT INTO archive_record (aweme_id, source_type, markdown_path, analysis_path, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(aweme_id, source_type) DO UPDATE SET
+                markdown_path = excluded.markdown_path,
+                analysis_path = excluded.analysis_path,
+                created_at = excluded.created_at
+        ''', (
+            record.get('aweme_id', ''),
+            record.get('source_type', 'douyin'),
+            record.get('markdown_path'),
+            record.get('analysis_path'),
+            now_ts,
+        ))
+        await db.commit()
 
     async def close(self):
         if self._conn is not None:

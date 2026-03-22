@@ -1,3 +1,10 @@
+"""TranscriptManager — orchestrates transcription, archiving, and analysis for downloaded videos.
+
+Integrates with the existing download flow (BaseDownloader._download_aweme_assets calls
+transcript_manager.process_video). Now supports both OpenAI API and local whisper providers,
+plus markdown archive and analysis outputs.
+"""
+
 import json
 import os
 from pathlib import Path
@@ -7,6 +14,12 @@ import aiofiles
 import aiohttp
 
 from config import ConfigLoader
+from core.analysis_manager import AnalysisManager
+from core.archive_manager import ArchiveManager
+from core.transcript_formatter import format_transcript
+from core.transcript_providers.base import TranscriptProvider, TranscriptResult
+from core.transcript_providers.local_whisper_provider import LocalWhisperProvider
+from core.transcript_providers.openai_provider import OpenAITranscriptProvider
 from storage import Database, FileManager
 from utils.logger import setup_logger
 
@@ -23,9 +36,16 @@ class TranscriptManager:
         self.config = config
         self.file_manager = file_manager
         self.database = database
+        self._provider: Optional[TranscriptProvider] = None
 
     def _cfg(self) -> Dict[str, Any]:
         return self.config.get("transcript", {}) or {}
+
+    def _archive_cfg(self) -> Dict[str, Any]:
+        return self.config.get("archive", {}) or {}
+
+    def _analysis_cfg(self) -> Dict[str, Any]:
+        return self.config.get("analysis", {}) or {}
 
     def _enabled(self) -> bool:
         return bool(self._cfg().get("enabled", False))
@@ -40,23 +60,29 @@ class TranscriptManager:
         normalized = [str(item).strip().lower() for item in formats if str(item).strip()]
         return normalized or ["txt", "json"]
 
-    def _resolve_api_key(self) -> str:
-        transcript_cfg = self._cfg()
-        api_key_env = str(transcript_cfg.get("api_key_env", "OPENAI_API_KEY")).strip()
-        if api_key_env:
-            env_value = os.getenv(api_key_env, "").strip()
-            if env_value:
-                return env_value
+    def _get_provider(self) -> TranscriptProvider:
+        """Lazily create the transcript provider based on config."""
+        if self._provider is not None:
+            return self._provider
 
-        return str(transcript_cfg.get("api_key", "")).strip()
+        cfg = self._cfg()
+        provider_name = str(cfg.get("provider", "openai_api")).strip().lower()
 
-    def _api_url(self) -> str:
-        api_url = str(
-            self._cfg().get(
-                "api_url", "https://api.openai.com/v1/audio/transcriptions"
-            )
-        ).strip()
-        return api_url or "https://api.openai.com/v1/audio/transcriptions"
+        if provider_name in ("local", "local_whisper"):
+            local_model = str(cfg.get("local_model", "small")).strip()
+            self._provider = LocalWhisperProvider(default_model=local_model)
+        elif provider_name == "auto":
+            local_model = str(cfg.get("local_model", "small")).strip()
+            local = LocalWhisperProvider(default_model=local_model)
+            if local.is_available():
+                self._provider = local
+            else:
+                self._provider = OpenAITranscriptProvider(cfg)
+        else:
+            # Default: openai_api (backward compatible)
+            self._provider = OpenAITranscriptProvider(cfg)
+
+        return self._provider
 
     def resolve_output_dir(self, video_path: Path) -> Path:
         video_path = Path(video_path)
@@ -88,57 +114,110 @@ class TranscriptManager:
             output_dir / f"{stem}.transcript.json",
         )
 
-    async def process_video(self, video_path: Path, aweme_id: str) -> Dict[str, Any]:
+    async def process_video(
+        self,
+        video_path: Path,
+        aweme_id: str,
+        *,
+        title: str = "",
+        author: str = "",
+        publish_date: str = "",
+        source_url: str = "",
+        tags: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
         video_path = Path(video_path)
 
         if not self._enabled():
             return {"status": "skipped", "reason": "disabled"}
 
-        api_key = self._resolve_api_key()
         text_path, json_path = self.build_output_paths(video_path)
-        model = self._model()
+        provider = self._get_provider()
+        model_name = self._model()
+        language = str(self._cfg().get("language_hint", "")).strip() or "zh"
 
-        if not api_key:
-            await self._record_job(
-                aweme_id=aweme_id,
-                video_path=video_path,
-                transcript_dir=text_path.parent,
-                text_path=text_path,
-                json_path=json_path,
-                model=model,
-                status="skipped",
-                skip_reason="missing_api_key",
-                error_message=None,
-            )
-            logger.warning(
-                "Transcript skipped for aweme %s: missing_api_key", aweme_id
-            )
-            return {"status": "skipped", "reason": "missing_api_key"}
-
+        # --- Transcription ---
         try:
-            payload = await self._call_openai_transcription(
-                api_key=api_key,
-                video_path=video_path,
-                model=model,
+            transcript_result = await provider.transcribe(
+                video_path, language=language, model=model_name
             )
-            text = str(payload.get("text", "")).strip()
-            await self._write_outputs(payload, text_path, json_path)
+            text = transcript_result.text
+            formatted_text = format_transcript(text)
+
+            await self._write_outputs(
+                {"text": text}, text_path, json_path, formatted_text=formatted_text
+            )
+
+            status = "success" if transcript_result.success else "failed"
+
             await self._record_job(
                 aweme_id=aweme_id,
                 video_path=video_path,
                 transcript_dir=text_path.parent,
                 text_path=text_path,
                 json_path=json_path,
-                model=model,
-                status="success",
+                model=transcript_result.model or model_name,
+                status=status,
                 skip_reason=None,
-                error_message=None,
+                error_message=None if transcript_result.success else text,
             )
-            return {
-                "status": "success",
+
+            result: Dict[str, Any] = {
+                "status": status,
                 "text_path": str(text_path),
                 "json_path": str(json_path),
+                "provider": transcript_result.provider,
             }
+
+            # --- Archive (markdown) ---
+            archive_cfg = self._archive_cfg()
+            if archive_cfg.get("enabled", True) and transcript_result.success:
+                archive_mgr = ArchiveManager(archive_cfg.get("output_dir"))
+                archive_dir = archive_mgr.resolve_output_dir(text_path.parent)
+                md_path = await archive_mgr.write_markdown(
+                    title=title or video_path.stem,
+                    transcript_text=text,
+                    output_dir=archive_dir,
+                    aweme_id=aweme_id,
+                    source_url=source_url,
+                    author=author,
+                    publish_date=publish_date,
+                    tags=tags,
+                    raw=archive_cfg.get("raw", False),
+                )
+                if md_path:
+                    result["markdown_path"] = str(md_path)
+
+            # --- Analysis ---
+            analysis_cfg = self._analysis_cfg()
+            if analysis_cfg.get("enabled", True) and transcript_result.success:
+                analysis_mgr = AnalysisManager(analysis_cfg.get("output_dir"))
+                analysis_dir = analysis_mgr.resolve_output_dir(text_path.parent)
+                analysis_path = await analysis_mgr.write_analysis(
+                    title=title or video_path.stem,
+                    author=author,
+                    aweme_id=aweme_id,
+                    publish_time=publish_date,
+                    source_url=source_url,
+                    transcript_path=str(text_path),
+                    markdown_path=result.get("markdown_path", ""),
+                    tags=tags,
+                    transcript_text=text,
+                    output_dir=analysis_dir,
+                )
+                if analysis_path:
+                    result["analysis_path"] = str(analysis_path)
+
+            # --- Record archive to database ---
+            if self.database and (result.get("markdown_path") or result.get("analysis_path")):
+                await self.database.upsert_archive_record({
+                    "aweme_id": aweme_id,
+                    "source_type": "douyin",
+                    "markdown_path": result.get("markdown_path"),
+                    "analysis_path": result.get("analysis_path"),
+                })
+
+            return result
+
         except Exception as exc:
             error_message = str(exc)
             await self._record_job(
@@ -147,7 +226,7 @@ class TranscriptManager:
                 transcript_dir=text_path.parent,
                 text_path=text_path,
                 json_path=json_path,
-                model=model,
+                model=model_name,
                 status="failed",
                 skip_reason=None,
                 error_message=error_message,
@@ -160,73 +239,23 @@ class TranscriptManager:
             }
 
     async def _write_outputs(
-        self, payload: Dict[str, Any], text_path: Path, json_path: Path
+        self,
+        payload: Dict[str, Any],
+        text_path: Path,
+        json_path: Path,
+        *,
+        formatted_text: str = "",
     ) -> None:
         formats = set(self._response_formats())
 
         if "txt" in formats:
-            text = str(payload.get("text", "")).strip()
+            text = formatted_text or str(payload.get("text", "")).strip()
             async with aiofiles.open(text_path, "w", encoding="utf-8") as f:
                 await f.write(text)
 
         if "json" in formats:
             async with aiofiles.open(json_path, "w", encoding="utf-8") as f:
                 await f.write(json.dumps(payload, ensure_ascii=False, indent=2))
-
-    async def _call_openai_transcription(
-        self, api_key: str, video_path: Path, model: str
-    ) -> Dict[str, Any]:
-        if not video_path.exists():
-            raise FileNotFoundError(f"Video file not found: {video_path}")
-
-        transcript_cfg = self._cfg()
-        language_hint = str(transcript_cfg.get("language_hint", "")).strip()
-        api_url = self._api_url()
-
-        form = aiohttp.FormData()
-        form.add_field("model", model)
-        form.add_field("response_format", "json")
-        if language_hint:
-            form.add_field("language", language_hint)
-
-        content_type = self._guess_video_content_type(video_path)
-        with video_path.open("rb") as f:
-            form.add_field(
-                "file",
-                f,
-                filename=video_path.name,
-                content_type=content_type,
-            )
-            timeout = aiohttp.ClientTimeout(total=600)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(
-                    api_url,
-                    data=form,
-                    headers={"Authorization": f"Bearer {api_key}"},
-                ) as response:
-                    if response.status != 200:
-                        body = await response.text()
-                        raise RuntimeError(
-                            f"OpenAI transcription failed: status={response.status}, body={body}"
-                        )
-
-                    payload = await response.json(content_type=None)
-                    if not isinstance(payload, dict):
-                        raise RuntimeError("OpenAI transcription returned invalid payload")
-                    return payload
-
-    @staticmethod
-    def _guess_video_content_type(video_path: Path) -> str:
-        suffix = video_path.suffix.lower()
-        if suffix == ".mp4":
-            return "video/mp4"
-        if suffix == ".m4a":
-            return "audio/mp4"
-        if suffix == ".wav":
-            return "audio/wav"
-        if suffix == ".mp3":
-            return "audio/mpeg"
-        return "application/octet-stream"
 
     async def _record_job(
         self,
