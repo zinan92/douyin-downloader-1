@@ -1,6 +1,17 @@
-# douyin-downloader-1
+<div align="center">
 
-批量下载抖音视频并自动转录、归档、生成结构化摘要，覆盖从内容采集到文本分析的完整 pipeline。
+# Douyin Downloader
+
+**批量下载抖音视频并自动转录、归档、生成结构化摘要 -- 从内容采集到文本分析的完整 pipeline**
+
+[![Python 3.8+](https://img.shields.io/badge/Python-3.8+-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
+[![Version 2.0.0](https://img.shields.io/badge/version-2.0.0-blue.svg)](https://github.com/zinan92/douyin-downloader-1)
+[![License MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Tests 167](https://img.shields.io/badge/tests-167-brightgreen.svg)](tests/)
+
+</div>
+
+---
 
 ```
 in  抖音 URL（视频/博主/合集/音乐/收藏夹）或本地媒体文件路径
@@ -16,7 +27,59 @@ fail 网络超时/服务端 5xx         → 指数退避重试（1s → 2s → 5
 
 Adapters: OpenAI API, mlx-whisper (Apple Silicon), openai-whisper (CPU)
 
----
+## 示例输出
+
+**CLI 运行效果：**
+
+```
+$ python3 run.py -c config.yml -u "https://www.douyin.com/video/7604129988555574538"
+
+  Douyin Downloader v2.0.0
+  ========================
+
+  [1/1] 解析链接... ✓ 视频类型
+  [1/1] 下载视频 (无水印)... ██████████████████████████████ 100% 12.4MB
+  [1/1] 下载封面... ✓
+  [1/1] 下载音乐... ✓
+  [1/1] 保存元数据 JSON... ✓
+  [1/1] 转录中 (provider: openai_api)... ✓ 2m34s 音频 → 1,247 字
+  [1/1] 生成 Markdown 归档... ✓
+  [1/1] 生成分析摘要... ✓
+
+  完成! 已保存到 ./Downloaded/某博主_7604129988555574538/
+```
+
+**输出文件结构：**
+
+```
+Downloaded/某博主_7604129988555574538/
+├── 视频标题.mp4                    # 去水印视频
+├── 视频标题_cover.jpg              # 封面
+├── 视频标题_music.mp3              # 背景音乐
+├── 视频标题_data.json              # 抖音元数据
+├── 视频标题.transcript.txt         # 格式化转录文本
+├── 视频标题.transcript.json        # 原始转录 JSON
+├── 视频标题.md                     # Markdown 归档
+└── 视频标题_analysis.json          # 结构化分析摘要
+```
+
+**分析摘要示例（_analysis.json）：**
+
+```json
+{
+  "title": "视频标题",
+  "duration_seconds": 154,
+  "word_count": 1247,
+  "language": "zh",
+  "topics": ["投资", "理财", "基金"],
+  "summary": "视频讲解了基金定投的三大核心策略...",
+  "key_points": [
+    "定投频率建议每周一次",
+    "选择宽基指数降低风险",
+    "止盈不止损的操作原则"
+  ]
+}
+```
 
 ## 架构
 
@@ -184,7 +247,7 @@ douyin-downloader-1/
 ├── control/                      # 队列、限速、重试
 ├── utils/                        # 工具函数（签名、校验、日志）
 ├── tools/                        # 辅助工具（Cookie 获取器）
-├── tests/                        # 171 个测试
+├── tests/                        # 167 个测试
 ├── config.example.yml            # 配置模板
 ├── run.py                        # 入口脚本
 └── pyproject.toml                # 项目元数据
